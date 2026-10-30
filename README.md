@@ -1,4 +1,6 @@
-# PilotMixer
+# The Audio Mixer That Doesn't Require an Audio Engineering Degree.
+
+One Panel. Three Presets. No Audio Engineering Required.
 
 A local, cockpit-style audio router and soundboard for Windows. PilotMixer is built with Python 3.11, PySide6, NumPy, SciPy, and PortAudio via `sounddevice`.
 
@@ -77,8 +79,4 @@ The suite covers the deterministic mix path, ring-buffer behavior, soundboard re
 
 ## License
 
-PilotMixer is **proprietary, source-visible software**, not open source. The source in this repository is provided for viewing only. No permission is granted to use, run, copy, modify, distribute, sublicense, or create derivative works from the source code.
-
-Official compiled PilotMixer builds may be offered free of charge under separate written terms. Those terms do not grant any rights to this source repository.
-
-See [LICENSE](LICENSE) for the full terms. This project is not affiliated with VB-Audio or Discord.
+This project is **source-available** under the PolyForm Strict License 1.0.0. You are free to use it for noncommercial purposes, but you may not modify, distribute, or reuse the code.
