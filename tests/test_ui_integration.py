@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -21,6 +22,37 @@ from theme import ThemeManager
 
 APP = QApplication.instance() or QApplication([])
 
+DEVICE_FIXTURE = [
+    {
+        "index": 10,
+        "name": "Microphone (USB Audio)",
+        "inputs": 2,
+        "outputs": 0,
+        "default_sample_rate": 48000.0,
+    },
+    {
+        "index": 11,
+        "name": "CABLE Output (VB-Audio Virtual Cable)",
+        "inputs": 2,
+        "outputs": 0,
+        "default_sample_rate": 48000.0,
+    },
+    {
+        "index": 12,
+        "name": "Speakers (USB Audio)",
+        "inputs": 0,
+        "outputs": 2,
+        "default_sample_rate": 48000.0,
+    },
+    {
+        "index": 13,
+        "name": "CABLE In 16ch (VB-Audio Virtual Cable)",
+        "inputs": 0,
+        "outputs": 2,
+        "default_sample_rate": 48000.0,
+    },
+]
+
 
 def write_wav(path: Path, frames: int = 800) -> None:
     with wave.open(str(path), "wb") as wav:
@@ -38,6 +70,7 @@ class FakeService(QObject):
     def __init__(self):
         super().__init__()
         self.trigger_calls = []
+        self.routes = []
 
     def start(self, config):
         return True
@@ -49,6 +82,7 @@ class FakeService(QObject):
         return True
 
     def set_route(self, source, destination, enabled):
+        self.routes.append((source, destination, enabled))
         return True
 
     def set_volume(self, channel, value):
@@ -147,6 +181,102 @@ class SoundboardUiTests(unittest.TestCase):
             [(str(self.wav_one), 1.0, False)],
         )
 
+    def test_ui_config_aliases_endpoint_and_matrix_labels(self):
+        config_path = self.root / "ui_config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "device_aliases": {
+                        "Cable Output": "Discord Input",
+                    },
+                    "matrix_aliases": {
+                        "VIRTUAL CABLE": "DISCORD INPUT",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        window = MainWindow(
+            service=FakeService(),
+            devices=DEVICE_FIXTURE,
+            soundboard_config=SoundboardConfig(),
+            soundboard_path=self.root / "aliased_soundboard.json",
+            hotkey_manager=FakeHotkeyManager(),
+            theme_manager=FakeThemeManager(),
+            ui_config_path=config_path,
+        )
+        try:
+            combo = window.device_combos["system"]
+            labels = [
+                combo.itemText(index)
+                for index in range(combo.count())
+            ]
+            self.assertTrue(
+                any("Discord Input" in label for label in labels)
+            )
+            self.assertEqual(
+                window.matrix_headers["virtual_cable"].text(),
+                "DISCORD INPUT",
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            APP.processEvents()
+
+    def test_streamer_preset_sets_all_crosspoints(self):
+        self.service.running_changed.emit(True)
+        self.service.routes.clear()
+
+        QTest.mouseClick(
+            self.window.preset_buttons["streamer"],
+            Qt.MouseButton.LeftButton,
+        )
+
+        for source in ("mic", "system", "soundboard"):
+            for destination in ("headphones", "virtual_cable"):
+                self.assertTrue(
+                    self.window.route_buttons[
+                        (source, destination)
+                    ].isChecked()
+                )
+                self.assertIn(
+                    (source, destination, True),
+                    self.service.routes,
+                )
+
+    def test_monitor_toggle_forces_soundboard_headphones_route(self):
+        self.service.running_changed.emit(True)
+        self.service.routes.clear()
+        matrix_route = self.window.route_buttons[
+            ("soundboard", "headphones")
+        ]
+        self.assertFalse(matrix_route.isChecked())
+
+        QTest.mouseClick(
+            self.window.monitor_button,
+            Qt.MouseButton.LeftButton,
+        )
+
+        self.assertTrue(self.window.monitor_button.isChecked())
+        self.assertFalse(matrix_route.isChecked())
+        self.assertIn(
+            ("soundboard", "headphones", True),
+            self.service.routes,
+        )
+
+        self.service.routes.clear()
+        QTest.mouseClick(
+            self.window.monitor_button,
+            Qt.MouseButton.LeftButton,
+        )
+
+        self.assertFalse(self.window.monitor_button.isChecked())
+        self.assertIn(
+            ("soundboard", "headphones", False),
+            self.service.routes,
+        )
+
     def test_binding_hotkey_updates_manager_and_trigger_path(self):
         self.window._load_pad_file(0, str(self.wav_one))
 
@@ -183,6 +313,31 @@ class SoundboardUiTests(unittest.TestCase):
         self.assertIn("already bound", self.window.error_label.text())
         self.assertEqual(len(self.hotkeys.update_calls), updates_before)
         self.assertEqual(list(self.hotkeys.mapping), ["<ctrl>+<f9>"])
+
+    def test_tutorial_button_opens_five_step_panel(self):
+        QTest.mouseClick(
+            self.window.tutorial_button,
+            Qt.MouseButton.LeftButton,
+        )
+        APP.processEvents()
+
+        panel = self.window.tutorial_panel
+        self.assertIsNotNone(panel)
+        self.assertTrue(panel.isVisible())
+        self.assertEqual(len(panel.steps), 5)
+        self.assertEqual(panel.title.text(), "Header / Gain")
+        self.assertIs(
+            panel.steps[0]["target"],
+            self.window.input_faders["mic"],
+        )
+        self.assertIs(
+            panel.steps[1]["target"],
+            self.window.output_meters["headphones"],
+        )
+        self.assertIs(panel.steps[2]["target"], self.window.matrix_panel)
+        self.assertIs(panel.steps[3]["target"], self.window.device_bar)
+        self.assertIs(panel.steps[4]["target"], self.window.pad_buttons[0])
+        panel.close_tutorial()
 
     def test_existing_hotkeys_are_initialized_at_startup(self):
         config = SoundboardConfig()

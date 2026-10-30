@@ -329,6 +329,37 @@ class ThemeManager:
             color: {colors["accent"]};
             border-color: {colors["accent"]};
         }}
+        QPushButton#monitorButton {{
+            color: {colors["muted"]};
+            background: {colors["background"]};
+            border: 1px solid {colors["border"]};
+            padding: 3px 6px;
+            font-size: 8px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }}
+        QPushButton#monitorButton:hover {{
+            color: {colors["accent"]};
+            border-color: {colors["accent"]};
+        }}
+        QPushButton#monitorButton:checked {{
+            color: {colors["on_accent"]};
+            background: {colors["accent"]};
+            border-color: {colors["accent"]};
+        }}
+        QPushButton#presetButton {{
+            color: {colors["muted"]};
+            background: {colors["panel_raised"]};
+            border: 1px solid {colors["border"]};
+            padding: 3px 8px;
+            font-size: 8px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }}
+        QPushButton#presetButton:hover {{
+            color: {colors["accent"]};
+            border-color: {colors["accent"]};
+        }}
         QPushButton {{
             background: {colors["panel_raised"]};
             color: {colors["text"]};

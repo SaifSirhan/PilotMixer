@@ -1,0 +1,11 @@
+{
+  "device_aliases": {
+    "Cable Output": "Discord Input",
+    "Cable In 16ch": "Virtual Cable In",
+    "Speakers": "Monitor Output"
+  },
+  "matrix_aliases": {
+    "HEADPHONES": "MONITOR",
+    "VIRTUAL CABLE": "DISCORD INPUT"
+  }
+}

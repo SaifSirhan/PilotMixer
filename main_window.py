@@ -30,6 +30,8 @@ from engine_service import EngineConfig, EngineService
 from hotkey_manager import HotkeyManager
 from soundboard_model import SoundboardConfig, SoundPad
 from theme import THEMES, ThemeManager
+from tutorial_panel import TutorialPanel
+from ui_config import load_ui_config
 
 
 SOURCE_LABELS = (
@@ -47,6 +49,30 @@ DEVICE_LABELS = (
     ("headphones", "HEADPHONES OUT"),
     ("virtual_cable", "CABLE OUT"),
 )
+PRESET_BUTTONS = (
+    ("streamer", "STREAMER"),
+    ("soundboard_only", "SOUNDBOARD ONLY"),
+    ("local_only", "LOCAL ONLY"),
+)
+PRESET_ROUTES = {
+    "streamer": frozenset(
+        (source, destination)
+        for source in ("mic", "system", "soundboard")
+        for destination in ("headphones", "virtual_cable")
+    ),
+    "soundboard_only": frozenset(
+        {
+            ("soundboard", "headphones"),
+            ("soundboard", "virtual_cable"),
+        }
+    ),
+    "local_only": frozenset(
+        {
+            ("mic", "headphones"),
+            ("system", "headphones"),
+        }
+    ),
+}
 DEFAULT_SOUNDBOARD_PATH = Path(__file__).with_name("soundboard_config.json")
 
 
@@ -63,6 +89,8 @@ class MainWindow(QMainWindow):
         soundboard_path=None,
         hotkey_manager=None,
         theme_manager=None,
+        ui_config=None,
+        ui_config_path=None,
     ):
         super().__init__(parent)
 
@@ -74,7 +102,11 @@ class MainWindow(QMainWindow):
         self.output_meters = {}
         self.route_buttons = {}
         self.device_combos = {}
+        self.matrix_headers = {}
         self.pad_buttons = []
+        self.preset_buttons = {}
+        self.monitor_button = None
+        self.tutorial_panel = None
 
         self._soundboard_path = (
             Path(soundboard_path)
@@ -97,6 +129,11 @@ class MainWindow(QMainWindow):
             theme_manager
             if theme_manager is not None
             else ThemeManager(QApplication.instance())
+        )
+        self.ui_config = (
+            ui_config
+            if ui_config is not None
+            else load_ui_config(ui_config_path)
         )
         self.pad_hotkey_triggered.connect(self._trigger_pad)
 
@@ -144,9 +181,13 @@ class MainWindow(QMainWindow):
         header = QFrame()
         header.setObjectName("headerBar")
 
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(14, 10, 14, 10)
+        outer = QVBoxLayout(header)
+        outer.setContentsMargins(14, 10, 14, 10)
+        outer.setSpacing(8)
+
+        layout = QHBoxLayout()
         layout.setSpacing(12)
+        outer.addLayout(layout)
 
         brand_box = QVBoxLayout()
         brand_box.setSpacing(0)
@@ -182,6 +223,13 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.theme_combo)
 
+        self.tutorial_button = QPushButton("TUTORIAL")
+        self.tutorial_button.setMinimumWidth(92)
+        self.tutorial_button.setToolTip("Open the cockpit tutorial")
+        self.tutorial_button.setAccessibleName("Open cockpit tutorial")
+        self.tutorial_button.clicked.connect(self._start_tutorial)
+        layout.addWidget(self.tutorial_button)
+
         self.status_label = QLabel("OFFLINE")
         self.status_label.setObjectName("statusBadge")
         self.status_label.setProperty("online", False)
@@ -200,6 +248,26 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._stop)
         layout.addWidget(self.stop_button)
 
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_label = QLabel("PRESETS")
+        preset_label.setObjectName("sectionMeta")
+        preset_row.addWidget(preset_label)
+
+        for key, label in PRESET_BUTTONS:
+            button = QPushButton(label)
+            button.setObjectName("presetButton")
+            button.setMinimumHeight(24)
+            button.setToolTip(f"Apply the {label} routing preset")
+            button.clicked.connect(
+                lambda checked=False, preset=key:
+                self._apply_preset(preset)
+            )
+            self.preset_buttons[key] = button
+            preset_row.addWidget(button)
+
+        preset_row.addStretch(1)
+        outer.addLayout(preset_row)
         return header
 
     def _build_device_bar(self) -> QFrame:
@@ -230,6 +298,7 @@ class MainWindow(QMainWindow):
         self.refresh_button = QPushButton("SCAN")
         self.refresh_button.clicked.connect(self._refresh_devices)
         layout.addWidget(self.refresh_button, 0, Qt.AlignmentFlag.AlignBottom)
+        self.device_bar = bar
         return bar
 
     def _new_panel(self, title_text: str, meta_text: str):
@@ -279,6 +348,21 @@ class MainWindow(QMainWindow):
             strip_layout.addWidget(label)
             strip_layout.addWidget(meta)
             strip_layout.addWidget(fader, 1)
+
+            if key == "soundboard":
+                monitor = QPushButton("MONITOR")
+                monitor.setObjectName("monitorButton")
+                monitor.setCheckable(True)
+                monitor.setMinimumHeight(24)
+                monitor.setToolTip(
+                    "Force soundboard audio to headphones "
+                    "regardless of the matrix"
+                )
+                monitor.setAccessibleName("Monitor soundboard")
+                monitor.toggled.connect(self._on_monitor_toggled)
+                strip_layout.addWidget(monitor)
+                self.monitor_button = monitor
+
             self.input_faders[key] = fader
             strips.addWidget(strip, 1)
 
@@ -297,11 +381,15 @@ class MainWindow(QMainWindow):
         corner.setObjectName("sectionMeta")
         grid.addWidget(corner, 0, 0)
 
-        for column, (_, label_text) in enumerate(DEST_LABELS, start=1):
-            head = QLabel(label_text)
+        for column, (destination, label_text) in enumerate(
+            DEST_LABELS,
+            start=1,
+        ):
+            head = QLabel(self.ui_config.matrix_label(label_text))
             head.setObjectName("matrixHead")
             head.setAlignment(Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(head, 0, column)
+            self.matrix_headers[destination] = head
 
         for row, (source, label_text) in enumerate(SOURCE_LABELS, start=1):
             row_label = QLabel(label_text)
@@ -350,6 +438,7 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding,
         )
         layout.addWidget(self.telemetry_label, 1)
+        self.matrix_panel = panel
         return panel
 
     def _build_outputs(self) -> QFrame:
@@ -694,6 +783,60 @@ class MainWindow(QMainWindow):
             self._show_error(f"Soundboard save failed: {exc}")
             return False
 
+    def _start_tutorial(self) -> None:
+        if self.tutorial_panel is None:
+            self.tutorial_panel = TutorialPanel(self)
+        self.tutorial_panel.start(self._tutorial_steps())
+
+    def _tutorial_steps(self) -> list[dict]:
+        return [
+            {
+                "title": "Header / Gain",
+                "desc": (
+                    "This is your Input Gain. Adjust this until your mic "
+                    "peaks around -6 dB on the VU meter. Too high, and it "
+                    "distorts."
+                ),
+                "target": self.input_faders["mic"],
+            },
+            {
+                "title": "VU Meter",
+                "desc": (
+                    "dBFS (Decibels relative to Full Scale). 0 is maximum "
+                    "volume (clipping). Watch the PEAK marker to ensure you "
+                    "never hit 0."
+                ),
+                "target": self.output_meters["headphones"],
+            },
+            {
+                "title": "Routing Matrix",
+                "desc": (
+                    "Src is Source (Mic, System, Soundboard), Dst is "
+                    "Destination. A LINK routes audio. To send your mic to "
+                    "Discord, link 'MIC' to 'VIRTUAL CABLE'."
+                ),
+                "target": self.matrix_panel,
+            },
+            {
+                "title": "Endpoints",
+                "desc": (
+                    "Cable Output is the input Discord/OBS uses. Cable "
+                    "Speaker is for monitoring. Select 'Cable In 16ch' for "
+                    "advanced multi-channel routing."
+                ),
+                "target": self.device_bar,
+            },
+            {
+                "title": "Aux Bay",
+                "desc": (
+                    "Right-click a pad to bind a global hotkey or load a "
+                    "WAV. Pressing the hotkey triggers the sound on the "
+                    "Soundboard bus."
+                ),
+                "target": self.pad_buttons[0],
+            },
+        ]
+
     @staticmethod
     def _label(text: str, object_name: str) -> QLabel:
         label = QLabel(text)
@@ -725,8 +868,11 @@ class MainWindow(QMainWindow):
             combo.blockSignals(True)
             combo.clear()
             for device in values:
+                display_name = self.ui_config.device_label(
+                    device["name"]
+                )
                 combo.addItem(
-                    f"{device['index']:02d}  {device['name']}",
+                    f"{device['index']:02d}  {display_name}",
                     int(device["index"]),
                 )
             combo.blockSignals(False)
@@ -889,8 +1035,12 @@ class MainWindow(QMainWindow):
             self.service.set_volume(key, fader.value())
         for key, fader in self.output_faders.items():
             self.service.set_volume(key, fader.value())
-        for (source, destination), button in self.route_buttons.items():
-            self.service.set_route(source, destination, button.isChecked())
+        for source, destination in self.route_buttons:
+            self.service.set_route(
+                source,
+                destination,
+                self._effective_route((source, destination)),
+            )
 
     @Slot(str)
     def _on_status_changed(self, text: str) -> None:
@@ -914,15 +1064,69 @@ class MainWindow(QMainWindow):
     def _on_route_changed(self, source: str, destination: str, checked: bool) -> None:
         if not self._online:
             return
-        if not self.service.set_route(source, destination, checked):
-            button = self.route_buttons[(source, destination)]
+
+        crosspoint = (source, destination)
+        if not self.service.set_route(
+            source,
+            destination,
+            self._effective_route(crosspoint),
+        ):
+            button = self.route_buttons[crosspoint]
             button.blockSignals(True)
             button.setChecked(not checked)
             button.blockSignals(False)
             self._show_error("Route rejected by engine.")
             return
-        button = self.route_buttons[(source, destination)]
+
+        button = self.route_buttons[crosspoint]
         button.setText("OPEN" if checked else "LINK")
+
+    def _effective_route(self, crosspoint: tuple[str, str]) -> bool:
+        enabled = self.route_buttons[crosspoint].isChecked()
+        if (
+            crosspoint == ("soundboard", "headphones")
+            and self.monitor_button is not None
+            and self.monitor_button.isChecked()
+        ):
+            return True
+        return enabled
+
+    def _apply_preset(self, name: str) -> bool:
+        active = PRESET_ROUTES.get(name)
+        if active is None:
+            return False
+
+        for crosspoint, button in self.route_buttons.items():
+            enabled = crosspoint in active
+            button.blockSignals(True)
+            button.setChecked(enabled)
+            button.blockSignals(False)
+            button.setText("OPEN" if enabled else "LINK")
+
+            if self._online:
+                source, destination = crosspoint
+                if not self.service.set_route(
+                    source,
+                    destination,
+                    self._effective_route(crosspoint),
+                ):
+                    self._show_error(
+                        f"Preset {name.upper()} rejected by engine."
+                    )
+                    return False
+
+        return True
+
+    def _on_monitor_toggled(self, checked: bool) -> None:
+        if not self._online:
+            return
+
+        if not self.service.set_route(
+            "soundboard",
+            "headphones",
+            self._effective_route(("soundboard", "headphones")),
+        ):
+            self._show_error("Monitor routing rejected by engine.")
 
     @Slot()
     def _poll_meters(self) -> None:
@@ -997,6 +1201,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
+        if self.tutorial_panel is not None:
+            self.tutorial_panel.close_tutorial()
+
         try:
             self.hotkey_manager.stop()
         except Exception as exc:
