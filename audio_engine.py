@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import random
 import threading
 import time
 
 import numpy as np
 import sounddevice as sd
+from scipy.io import wavfile
 from scipy.signal import resample_poly
 
 
@@ -465,6 +467,42 @@ class AudioEngine:
 
         with self._config_lock:
             self._sound = (self._sound[0] + 1, audio)
+
+    def trigger_pad(
+        self,
+        filepath: str,
+        volume: float = 1.0,
+        randomize: bool = False,
+    ) -> None:
+        sample_rate, pcm = wavfile.read(filepath)
+        audio = self._wav_to_float(pcm)
+
+        gain = float(volume)
+        if not math.isfinite(gain):
+            raise ValueError("Pad volume must be finite")
+        gain = max(0.0, min(1.0, gain))
+
+        if randomize and len(audio) > 1:
+            offset = random.randint(0, len(audio) - 1)
+            audio = audio[offset:]
+
+        audio = np.ascontiguousarray(audio * gain, dtype=np.float32)
+        self.play_soundboard(audio, int(sample_rate))
+
+    @staticmethod
+    def _wav_to_float(pcm: np.ndarray) -> np.ndarray:
+        if pcm.dtype.kind == "f":
+            return np.asarray(pcm, dtype=np.float32)
+
+        if pcm.dtype.kind == "i":
+            scale = float(np.iinfo(pcm.dtype).max) + 1.0
+            return pcm.astype(np.float32) / scale
+
+        if pcm.dtype.kind == "u":
+            midpoint = (float(np.iinfo(pcm.dtype).max) + 1.0) / 2.0
+            return (pcm.astype(np.float32) - midpoint) / midpoint
+
+        raise ValueError(f"Unsupported WAV sample type: {pcm.dtype}")
 
     def stop_soundboard(self) -> None:
         with self._config_lock:

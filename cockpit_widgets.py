@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 
 from PySide6.QtCore import (
     QLineF,
@@ -14,15 +15,25 @@ from PySide6.QtCore import (
     Slot,
 )
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from theme import ThemeManager
 
 
-BLACK = QColor("#000000")
-MINT = QColor("#66ffc2")
-AMBER = QColor("#ffc857")
-RED = QColor("#ff5566")
-DIM = QColor("#173329")
-TEXT = QColor("#bdd8ca")
+_DEFAULT_THEME = ThemeManager().theme
+BLACK = QColor(_DEFAULT_THEME["background"])
+MINT = QColor(_DEFAULT_THEME["accent"])
+AMBER = QColor(_DEFAULT_THEME["secondary"])
+RED = QColor(_DEFAULT_THEME["alert"])
+DIM = QColor(_DEFAULT_THEME["dim"])
+TEXT = QColor(_DEFAULT_THEME["text"])
 
 
 def _font(size: int) -> QFont:
@@ -37,6 +48,188 @@ def _require_gui_thread(widget: QWidget) -> None:
         raise RuntimeError(
             "Update widgets on their GUI thread; use a queued Qt signal"
         )
+
+
+class SoundPadButton(QPushButton):
+    fileDropped = Signal(str)
+    doubleClicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("padButton")
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(46)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    @staticmethod
+    def _wav_path(mime):
+        if not mime.hasUrls():
+            return None
+
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.suffix.casefold() == ".wav":
+                return str(path)
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._wav_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._wav_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        path = self._wav_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+
+        self.fileDropped.emit(path)
+        event.acceptProposedAction()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.doubleClicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class HotkeyCaptureDialog(QDialog):
+    _MODIFIER_KEYS = (
+        Qt.Key.Key_Control,
+        Qt.Key.Key_Shift,
+        Qt.Key.Key_Alt,
+        Qt.Key.Key_Meta,
+    )
+    _SPECIAL_KEYS = {
+        Qt.Key.Key_Space: "<space>",
+        Qt.Key.Key_Tab: "<tab>",
+        Qt.Key.Key_Return: "<enter>",
+        Qt.Key.Key_Enter: "<enter>",
+        Qt.Key.Key_Backspace: "<backspace>",
+        Qt.Key.Key_Delete: "<delete>",
+        Qt.Key.Key_Insert: "<insert>",
+        Qt.Key.Key_Home: "<home>",
+        Qt.Key.Key_End: "<end>",
+        Qt.Key.Key_PageUp: "<page_up>",
+        Qt.Key.Key_PageDown: "<page_down>",
+        Qt.Key.Key_Up: "<up>",
+        Qt.Key.Key_Down: "<down>",
+        Qt.Key.Key_Left: "<left>",
+        Qt.Key.Key_Right: "<right>",
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.hotkey = None
+        self.setWindowTitle("Bind Hotkey")
+        self.setModal(True)
+        self.setMinimumWidth(320)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("BIND PAD HOTKEY")
+        title.setObjectName("sectionTitle")
+        prompt = QLabel("PRESS A KEY COMBINATION, THEN BIND")
+        prompt.setObjectName("sectionMeta")
+        prompt.setWordWrap(True)
+
+        self._value_label = QLabel("WAITING FOR INPUT")
+        self._value_label.setObjectName("stripLabel")
+        self._value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._value_label.setMinimumHeight(32)
+
+        buttons = QHBoxLayout()
+        cancel = QPushButton("CANCEL")
+        cancel.clicked.connect(self.reject)
+        self._bind_button = QPushButton("BIND")
+        self._bind_button.setObjectName("primaryButton")
+        self._bind_button.setEnabled(False)
+        self._bind_button.clicked.connect(self.accept)
+
+        for button in (cancel, self._bind_button):
+            button.setAutoDefault(False)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self._bind_button)
+
+        layout.addWidget(title)
+        layout.addWidget(prompt)
+        layout.addWidget(self._value_label)
+        layout.addLayout(buttons)
+
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
+
+    @staticmethod
+    def _modifier_parts(modifiers) -> list[str]:
+        parts = []
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            parts.append("<ctrl>")
+        if modifiers & Qt.KeyboardModifier.AltModifier:
+            parts.append("<alt>")
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            parts.append("<shift>")
+        if modifiers & Qt.KeyboardModifier.MetaModifier:
+            parts.append("<cmd>")
+        return parts
+
+    @classmethod
+    def _key_name(cls, event) -> str | None:
+        key = event.key()
+
+        if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+            return chr(int(key)).lower()
+        if Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
+            return chr(int(key))
+        if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12:
+            return f"<f{int(key) - int(Qt.Key.Key_F1) + 1}>"
+
+        special = cls._SPECIAL_KEYS.get(key)
+        if special is not None:
+            return special
+
+        text = event.text()
+        if len(text) == 1 and text.isprintable() and not text.isspace():
+            return text.casefold()
+        return None
+
+    def keyPressEvent(self, event):
+        key = event.key()
+
+        if key == Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+
+        if key in self._MODIFIER_KEYS:
+            parts = self._modifier_parts(event.modifiers())
+            self._value_label.setText("+".join(parts + ["..."]) if parts else "...")
+            event.accept()
+            return
+
+        key_name = self._key_name(event)
+        if key_name is None:
+            self._value_label.setText("UNSUPPORTED KEY")
+            event.accept()
+            return
+
+        parts = self._modifier_parts(event.modifiers())
+        self.hotkey = "+".join(parts + [key_name])
+        self._value_label.setText(self.hotkey.upper())
+        self._bind_button.setEnabled(True)
+        event.accept()
 
 
 class VerticalFader(QWidget):
@@ -147,23 +340,32 @@ class VerticalFader(QWidget):
         painter = QPainter(self)
 
         try:
-            painter.fillRect(self.rect(), BLACK)
+            colors = ThemeManager().theme
+            background = QColor(colors["background"])
+            text = QColor(colors["text"])
+            dim = QColor(colors["dim"])
+            track = QColor(colors["track"])
+            handle = QColor(colors["handle"])
+            accent = QColor(
+                colors["accent"] if self.isEnabled() else colors["disabled"]
+            )
+
+            painter.fillRect(self.rect(), background)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            accent = MINT if self.isEnabled() else QColor("#52645c")
             top, bottom = self._track()
             center = self.width() / 2.0
             handle_y = bottom - self._value * (bottom - top)
 
             painter.setFont(_font(8))
-            painter.setPen(TEXT)
+            painter.setPen(text)
             painter.drawText(
                 QRectF(0, 0, self.width(), 20),
                 Qt.AlignmentFlag.AlignCenter,
                 "GAIN",
             )
 
-            painter.setPen(QPen(DIM, 1))
+            painter.setPen(QPen(dim, 1))
             for tick in range(11):
                 y = bottom - tick / 10.0 * (bottom - top)
                 length = 11 if tick % 5 == 0 else 6
@@ -176,17 +378,17 @@ class VerticalFader(QWidget):
 
             painter.fillRect(
                 QRectF(center - 3, top, 6, bottom - top),
-                QColor("#0b1711"),
+                track,
             )
             painter.fillRect(
                 QRectF(center - 1, handle_y, 2, bottom - handle_y),
                 accent,
             )
 
-            handle = QRectF(center - 17, handle_y - 8, 34, 16)
+            handle_rect = QRectF(center - 17, handle_y - 8, 34, 16)
             painter.setPen(QPen(accent, 1))
-            painter.setBrush(QColor("#14251c"))
-            painter.drawRect(handle)
+            painter.setBrush(handle)
+            painter.drawRect(handle_rect)
             painter.drawLine(
                 QLineF(center - 12, handle_y, center + 12, handle_y)
             )
@@ -301,7 +503,16 @@ class VUMeter(QWidget):
         painter = QPainter(self)
 
         try:
-            painter.fillRect(self.rect(), BLACK)
+            colors = ThemeManager().theme
+            background = QColor(colors["background"])
+            text = QColor(colors["text"])
+            accent = QColor(colors["accent"])
+            secondary = QColor(colors["secondary"])
+            alert = QColor(colors["alert"])
+            dim = QColor(colors["dim"])
+            peak = QColor(colors["peak"])
+
+            painter.fillRect(self.rect(), background)
             painter.setFont(_font(8))
 
             if not self.isEnabled():
@@ -322,7 +533,7 @@ class VUMeter(QWidget):
             for channel, label in enumerate(("L", "R")):
                 x = 6.0 + channel * (bar_width + 6.0)
 
-                painter.setPen(TEXT)
+                painter.setPen(text)
                 painter.drawText(
                     QRectF(x, 0, bar_width, 20),
                     Qt.AlignmentFlag.AlignCenter,
@@ -333,14 +544,14 @@ class VUMeter(QWidget):
                     threshold = self.FLOOR_DB + (segment + 1) * 2.0
 
                     if threshold >= -2:
-                        color = RED
+                        color = alert
                     elif threshold >= -12:
-                        color = AMBER
+                        color = secondary
                     else:
-                        color = MINT
+                        color = accent
 
                     if self._levels[channel] < threshold:
-                        color = DIM
+                        color = dim
 
                     y = bottom - (segment + 1) * segment_height
                     painter.fillRect(
@@ -354,13 +565,13 @@ class VUMeter(QWidget):
                     )
 
                 if self._peaks[channel] > self.FLOOR_DB:
-                    painter.setPen(QPen(QColor("#effff7"), 2))
+                    painter.setPen(QPen(peak, 2))
                     y = y_for_db(self._peaks[channel])
                     painter.drawLine(
                         QLineF(x, y, x + bar_width, y)
                     )
 
-            painter.setPen(TEXT)
+            painter.setPen(text)
             for db in (0, -6, -12, -24, -36, -48, -60):
                 painter.drawText(
                     QRectF(

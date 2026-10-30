@@ -1,21 +1,35 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Slot
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
+    QDialog,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from cockpit_widgets import VUMeter, VerticalFader
+from cockpit_widgets import (
+    HotkeyCaptureDialog,
+    SoundPadButton,
+    VUMeter,
+    VerticalFader,
+)
 from engine_service import EngineConfig, EngineService
+from hotkey_manager import HotkeyManager
+from soundboard_model import SoundboardConfig, SoundPad
+from theme import THEMES, ThemeManager
 
 
 SOURCE_LABELS = (
@@ -33,10 +47,23 @@ DEVICE_LABELS = (
     ("headphones", "HEADPHONES OUT"),
     ("virtual_cable", "CABLE OUT"),
 )
+DEFAULT_SOUNDBOARD_PATH = Path(__file__).with_name("soundboard_config.json")
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, service=None, devices=None, parent=None):
+    pad_hotkey_triggered = Signal(int)
+
+    def __init__(
+        self,
+        service=None,
+        devices=None,
+        parent=None,
+        *,
+        soundboard_config=None,
+        soundboard_path=None,
+        hotkey_manager=None,
+        theme_manager=None,
+    ):
         super().__init__(parent)
 
         self.service = service if service is not None else EngineService(parent=self)
@@ -47,11 +74,38 @@ class MainWindow(QMainWindow):
         self.output_meters = {}
         self.route_buttons = {}
         self.device_combos = {}
+        self.pad_buttons = []
+
+        self._soundboard_path = (
+            Path(soundboard_path)
+            if soundboard_path is not None
+            else DEFAULT_SOUNDBOARD_PATH
+        )
+        self.soundboard_config = (
+            soundboard_config
+            if soundboard_config is not None
+            else SoundboardConfig.load(self._soundboard_path)
+        )
+        self._ensure_pad_bank()
+
+        self.hotkey_manager = (
+            hotkey_manager
+            if hotkey_manager is not None
+            else HotkeyManager()
+        )
+        self.theme_manager = (
+            theme_manager
+            if theme_manager is not None
+            else ThemeManager(QApplication.instance())
+        )
+        self.pad_hotkey_triggered.connect(self._trigger_pad)
 
         self.setWindowTitle("PILOTMIXER // CUSTOM AUDIO ROUTER")
         self.resize(1440, 900)
         self.setMinimumSize(1220, 760)
         self._build_ui()
+        self._refresh_pads()
+        self._refresh_hotkeys(initial=True)
         self._connect_service()
 
         self._timer = QTimer(self)
@@ -67,11 +121,8 @@ class MainWindow(QMainWindow):
             self._populate_devices(devices)
 
     def _build_ui(self) -> None:
-        from theme import BLACK
-
         root = QWidget()
         root.setObjectName("root")
-        root.setStyleSheet(f"background: {BLACK};")
         self.setCentralWidget(root)
 
         outer = QVBoxLayout(root)
@@ -107,6 +158,29 @@ class MainWindow(QMainWindow):
         brand_box.addWidget(sub)
         layout.addLayout(brand_box)
         layout.addStretch(1)
+
+        theme_label = QLabel("THEME")
+        theme_label.setObjectName("sectionMeta")
+        layout.addWidget(theme_label)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.setObjectName("themeCombo")
+        self.theme_combo.setMinimumWidth(140)
+        self.theme_combo.setAccessibleName("Application theme")
+        self.theme_combo.addItems(list(THEMES))
+        current_theme = getattr(
+            self.theme_manager,
+            "current_theme_name",
+            "",
+        )
+        theme_index = self.theme_combo.findText(current_theme)
+        self.theme_combo.setCurrentIndex(
+            theme_index if theme_index >= 0 else 0
+        )
+        self.theme_combo.currentTextChanged.connect(
+            self._on_theme_selected
+        )
+        layout.addWidget(self.theme_combo)
 
         self.status_label = QLabel("OFFLINE")
         self.status_label.setObjectName("statusBadge")
@@ -315,21 +389,46 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_aux(self) -> QFrame:
-        panel, layout = self._new_panel("AUX BAY", "DEFERRED MODULES")
+        panel, layout = self._new_panel(
+            "AUX BAY",
+            "SOUNDBOARD // HOTKEYS",
+        )
         panel.setMinimumWidth(220)
 
         layout.addWidget(self._label("SOUNDBOARD", "stripLabel"))
         pads = QGridLayout()
         pads.setSpacing(5)
         for slot in range(8):
-            pad = QLabel(f"{slot + 1:02d}")
-            pad.setObjectName("padSlot")
-            pad.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pad = SoundPadButton()
+            pad.clicked.connect(
+                lambda checked=False, index=slot: self._trigger_pad(index)
+            )
+            pad.doubleClicked.connect(
+                lambda index=slot: self._choose_pad_file(index)
+            )
+            pad.fileDropped.connect(
+                lambda filepath, index=slot: self._load_pad_file(
+                    index,
+                    filepath,
+                )
+            )
+            pad.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            pad.customContextMenuRequested.connect(
+                lambda position, index=slot: self._show_pad_menu(
+                    index,
+                    position,
+                )
+            )
+            self.pad_buttons.append(pad)
             pads.addWidget(pad, slot // 4, slot % 4)
         layout.addLayout(pads)
-        layout.addWidget(
-            self._label("BANK 00 // NO PAD SOURCE", "matrixNote")
+        self.pad_bank_label = self._label(
+            "BANK 00 // 0/8 LOADED",
+            "matrixNote",
         )
+        layout.addWidget(self.pad_bank_label)
 
         layout.addSpacing(10)
         layout.addWidget(self._label("VOICE RACK", "stripLabel"))
@@ -360,6 +459,240 @@ class MainWindow(QMainWindow):
         self.error_label.setMaximumWidth(760)
         layout.addWidget(self.error_label)
         return footer
+
+    def _ensure_pad_bank(self) -> None:
+        if not self.soundboard_config.banks:
+            self.soundboard_config.banks.append([])
+
+        bank = self.soundboard_config.banks[0]
+        while len(bank) < 8:
+            bank.append(SoundPad())
+        if len(bank) > 8:
+            del bank[8:]
+
+    def _pads(self) -> list[SoundPad]:
+        return self.soundboard_config.banks[0]
+
+    @staticmethod
+    def _pad_label(filepath: str | None) -> str:
+        if not filepath:
+            return "EMPTY"
+
+        name = Path(filepath).name
+        if len(name) <= 16:
+            return name
+
+        suffix = Path(name).suffix
+        stem_length = max(1, 16 - len(suffix) - 3)
+        return f"{name[:stem_length]}...{suffix}"
+
+    def _refresh_pads(self) -> None:
+        loaded = sum(1 for pad in self._pads() if pad.filepath)
+        self.pad_bank_label.setText(f"BANK 00 // {loaded}/8 LOADED")
+        for slot in range(8):
+            self._refresh_pad(slot)
+
+    def _refresh_pad(self, slot: int) -> None:
+        pad = self._pads()[slot]
+        button = self.pad_buttons[slot]
+        label = self._pad_label(pad.filepath)
+        hotkey = pad.hotkey or "UNBOUND"
+
+        button.setText(label)
+        button.setToolTip(
+            f"PAD {slot + 1:02d} // {label}\n"
+            f"{pad.filepath or 'NO FILE'}\n"
+            f"HOTKEY: {hotkey}"
+        )
+        button.setAccessibleName(
+            f"Soundboard pad {slot + 1:02d}: {label}"
+        )
+        button.setProperty("loaded", bool(pad.filepath))
+        button.style().unpolish(button)
+        button.style().polish(button)
+
+    def _load_pad_file(self, slot: int, filepath: str) -> bool:
+        if not 0 <= slot < len(self._pads()):
+            return False
+
+        path = Path(filepath)
+        if path.suffix.casefold() != ".wav":
+            self._show_error("Only .wav files can be loaded into pads.")
+            return False
+        if not path.is_file():
+            self._show_error(f"Soundboard file not found: {path}")
+            return False
+
+        self._pads()[slot].filepath = str(path)
+        self._refresh_pads()
+        self._save_soundboard()
+        self._refresh_hotkeys()
+        return True
+
+    def _choose_pad_file(self, slot: int) -> None:
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Load Pad {slot + 1:02d}",
+            "",
+            "WAV audio (*.wav)",
+        )
+        if filepath:
+            self._load_pad_file(slot, filepath)
+
+    def _clear_pad(self, slot: int) -> bool:
+        if not 0 <= slot < len(self._pads()):
+            return False
+
+        self._pads()[slot] = SoundPad()
+        self._refresh_pads()
+        self._save_soundboard()
+        self._refresh_hotkeys()
+        return True
+
+    def _show_pad_menu(self, slot: int, position) -> None:
+        pad = self._pads()[slot]
+        menu = QMenu(self)
+
+        bind = menu.addAction("Bind Hotkey")
+        bind.setEnabled(bool(pad.filepath))
+        bind.triggered.connect(
+            lambda checked=False, index=slot: self._capture_hotkey(index)
+        )
+
+        clear = menu.addAction("Clear Pad")
+        clear.setEnabled(bool(pad.filepath or pad.hotkey))
+        clear.triggered.connect(
+            lambda checked=False, index=slot: self._clear_pad(index)
+        )
+
+        menu.exec(self.pad_buttons[slot].mapToGlobal(position))
+
+    def _capture_hotkey(self, slot: int) -> None:
+        dialog = HotkeyCaptureDialog(self)
+        if (
+            dialog.exec() == QDialog.DialogCode.Accepted
+            and dialog.hotkey
+        ):
+            self._bind_hotkey(slot, dialog.hotkey)
+
+    def _bind_hotkey(self, slot: int, hotkey: str) -> bool:
+        if not 0 <= slot < len(self._pads()):
+            return False
+
+        hotkey = (hotkey or "").strip()
+        if not hotkey:
+            self._show_error("No hotkey captured.")
+            return False
+
+        pad = self._pads()[slot]
+        if not pad.filepath:
+            self._show_error("Load a WAV file before binding a hotkey.")
+            return False
+
+        normalized = hotkey.casefold()
+        for index, other in enumerate(self._pads()):
+            if index == slot or not other.hotkey:
+                continue
+            if other.hotkey.strip().casefold() == normalized:
+                self._show_error(
+                    f"Hotkey {hotkey} is already bound to "
+                    f"pad {index + 1:02d}."
+                )
+                return False
+
+        pad.hotkey = hotkey
+        self._refresh_pad(slot)
+        self._save_soundboard()
+        self._refresh_hotkeys()
+        return True
+
+    def _build_hotkey_mapping(self) -> dict:
+        mapping = {}
+        assigned = {}
+
+        for index, pad in enumerate(self._pads()):
+            hotkey = (pad.hotkey or "").strip()
+            if not pad.filepath or not hotkey:
+                continue
+
+            normalized = hotkey.casefold()
+            if normalized in assigned:
+                self._show_error(
+                    f"Hotkey {hotkey} is assigned to multiple pads; "
+                    f"pad {index + 1:02d} ignored."
+                )
+                continue
+
+            assigned[normalized] = index
+            mapping[hotkey] = (
+                lambda pad_index=index: self.pad_hotkey_triggered.emit(
+                    pad_index
+                )
+            )
+
+        return mapping
+
+    def _refresh_hotkeys(self, *, initial: bool = False) -> None:
+        mapping = self._build_hotkey_mapping()
+        try:
+            if not mapping:
+                self.hotkey_manager.stop()
+            elif initial:
+                self.hotkey_manager.start(mapping)
+            else:
+                self.hotkey_manager.update_mapping(mapping)
+        except Exception as exc:
+            self._show_error(f"Hotkey setup failed: {exc}")
+
+    @Slot(int)
+    def _trigger_pad(self, slot: int) -> bool:
+        if not 0 <= slot < len(self._pads()):
+            return False
+
+        pad = self._pads()[slot]
+        if not pad.filepath:
+            self._show_error(
+                f"PAD {slot + 1:02d} EMPTY // DOUBLE-CLICK TO LOAD"
+            )
+            return False
+
+        trigger = getattr(self.service, "trigger_pad", None)
+        if trigger is None:
+            self._show_error("Audio engine cannot trigger pads.")
+            return False
+
+        try:
+            started = trigger(pad.filepath, pad.volume, pad.randomize)
+        except Exception as exc:
+            self._show_error(f"Pad trigger failed: {exc}")
+            return False
+
+        if not started and not self._online:
+            self._show_error("ENGAGE THE ENGINE BEFORE TRIGGERING PADS")
+        return bool(started)
+
+    @Slot(str)
+    def _on_theme_selected(self, name: str) -> None:
+        try:
+            self.theme_manager.set_theme(name)
+        except Exception as exc:
+            self._show_error(f"Theme change failed: {exc}")
+            return
+
+        for widget in self.findChildren(QWidget):
+            widget.update()
+
+    def _save_soundboard(self) -> bool:
+        try:
+            self._soundboard_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            self.soundboard_config.save(self._soundboard_path)
+            return True
+        except (OSError, TypeError) as exc:
+            self._show_error(f"Soundboard save failed: {exc}")
+            return False
 
     @staticmethod
     def _label(text: str, object_name: str) -> QLabel:
@@ -664,6 +997,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._timer.stop()
+        try:
+            self.hotkey_manager.stop()
+        except Exception as exc:
+            self._show_error(f"Hotkey shutdown failed: {exc}")
+
         shutdown = getattr(self.service, "shutdown", None)
         if shutdown is not None:
             shutdown(timeout=2.0)

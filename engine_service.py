@@ -219,6 +219,23 @@ class EngineService(QObject):
             self._report_operation_error(str(exc))
             return False
 
+    def trigger_pad(
+        self,
+        filepath: str,
+        volume: float = 1.0,
+        randomize: bool = False,
+    ) -> bool:
+        engine = self._online_engine()
+        if engine is None:
+            return False
+
+        try:
+            engine.trigger_pad(filepath, volume, randomize)
+            return True
+        except Exception as exc:
+            self._report_operation_error(str(exc))
+            return False
+
     def get_levels(self, destination: str) -> tuple[float, float]:
         engine = self._online_engine()
         if engine is None:

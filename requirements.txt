@@ -1,4 +1,5 @@
 numpy==2.3.5
+pynput==1.8.2
 PySide6==6.11.2
 scipy==1.17.1
 sounddevice==0.5.6
